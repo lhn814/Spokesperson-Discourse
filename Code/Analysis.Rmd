@@ -1,0 +1,202 @@
+---
+title: "Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+1. Get required packages and data
+```{r message=FALSE}
+require(tm)
+require(tidytext)
+require(tidyverse)
+require(stringr)
+require(textdata)
+require(ggpubr)
+```
+
+2. Get data, remove the name of the media and the spokespersons
+```{r}
+df <- read.csv("Data/all_texts_EN.csv", stringsAsFactors = F)
+df$questions <- gsub("^[^:]+: ", "", df$questions)
+df$answers <- gsub("^[^:]+: ", "", df$answers)
+```
+
+3. Set the dictionaries
+```{r}
+#Create a dictionary for sensitive issues in China
+triggers <- c("Hong Kong", "Uyghur", "Tibet", "Taiwan", "virus", "trade war")
+
+#Create a dictionary for potentially hostile countries or regions (Russia as a reference)
+target_regions <- c("US", "Canada", "Australia", "Japan", "UK", "Europe", "Russia")
+
+#Potential hostile political figures (I sometimes choose first name for more precise identifications)
+target_individuals <- c("Trump", "Pompeo", "Pence", "Esper", "Pelosi", "Rubio", "Biden", "Ing-wen", "Johnson", "Macron", "Merkel", "Shinzo")
+```
+
+4. Preprocessing for sentiment analysis
+```{r}
+docs <- Corpus(VectorSource(df$answers))
+
+dtm <- DocumentTermMatrix(docs,
+              control = list(tolower = T,
+                             removeNumbers = T,
+                             removePunctuation = T,
+                             stopwords = T))
+
+dtm <- as.data.frame(as.matrix(dtm))
+```
+
+5. Conduct sentiment analysis
+```{r}
+sent <- get_sentiments("bing")
+sent$score <- ifelse(sent$sentiment == "positive", 1, -1)
+
+words = data.frame(word = colnames(dtm), stringsAsFactors = F)
+words_sent <- words %>%
+  left_join(sent, by = "word") %>%
+  mutate(score = replace_na(score, 0)) %>%
+  filter(row_number() != 14501) #This is because a weird error: one of the words repeated once after left-joined
+  
+doc_scores <- as.matrix(dtm) %*% words_sent$score
+df$sentiment <- doc_scores
+```
+
+6. Adding required variables
+```{r warning=F}
+#Prepare dictionaries to match
+match_trigger <- paste(triggers, collapse = "|")
+match_target_regions <- paste(target_regions, collapse = "|")
+match_target_individuals <- paste(target_individuals, collapse = "|")
+
+#Add explanatory variables and also the dependent variable according to the "attitude" dictionary
+df <- df %>%
+  mutate(trigger = str_extract(answers, match_trigger),
+         region = str_extract(answers, match_target_regions),
+         individuals = str_extract(questions, match_target_individuals)) #I use questions because in many cases the answers will not directly include the target individual's name. However, the aggressive responses are often triggered by the comment of the target individual included in the questions.
+
+#Replace NAs to "others"        
+df$trigger <- replace_na(df$trigger, "others")
+df$region <- replace_na(df$region, "others")
+df$individuals <- replace_na(df$individuals, "others")
+```
+
+7(1). Do different speakers exhibit different attitudes in general?
+```{r message=F}
+#Set the order to prepare for the ggplot
+df_speaker_sent <- df %>%
+group_by(speaker) %>%
+  summarize(mean_speaker_sent = mean(sentiment)) %>%
+  ungroup() %>%
+  arrange(-mean_speaker_sent) %>%
+  select(speaker)
+
+df$speaker <- factor(df$speaker, levels = as.character(df_speaker_sent$speaker), ordered = T)
+  
+plot_speaker <- ggplot(data = df, aes(x = speaker, y = sentiment)) + 
+  geom_boxplot(width = 0.5) +
+  ggtitle("Sentiment analysis for speakers")
+ggsave("plot_speaker.jpg", plot_speaker)
+```
+
+```{r warning=F}
+#A simple t-test to compare the means between the sentiments of different speakers
+lu_kang <- df %>%
+  filter(speaker == "Lu Kang")
+geng_shuang <- df %>%
+  filter(speaker == "Geng Shuang")
+hua_chunying <- df %>%
+  filter(speaker == "Hua Chunying")
+wang_wenbin <- df %>%
+  filter(speaker == "Wang Wenbin")
+zhao_lijian <- df %>%
+  filter(speaker == "Zhao Lijian")
+
+ttest_1 <- rbind(lu_kang, zhao_lijian)
+tab_1 <- compare_means(sentiment ~ speaker, data = ttest_1, method = "t.test") %>%
+  select(.y., group1, group2, p, p.signif)
+
+ttest_2 <- rbind(geng_shuang, zhao_lijian)
+tab_2 <- compare_means(sentiment ~ speaker, data = ttest_2, method = "t.test") %>%
+  select(.y., group1, group2, p, p.signif)
+
+ttest_3 <- rbind(hua_chunying, zhao_lijian)
+tab_3 <- compare_means(sentiment ~ speaker, data = ttest_3, method = "t.test") %>%
+  select(.y., group1, group2, p, p.signif)
+
+ttest_4 <- rbind(wang_wenbin, zhao_lijian)
+tab_4 <- compare_means(sentiment ~ speaker, data = ttest_4, method = "t.test") %>%
+  select(.y., group1, group2, p, p.signif)
+
+ttest <- rbind(tab_1, tab_2, tab_3, tab_4)
+write.csv(ttest, "ttest speakers.csv")
+```
+
+7(2). Compare issues that may trigger negative sentiments
+```{r message=F}
+df_trigger <- df %>%
+  group_by(trigger) %>%
+  summarize(mean_trigger = mean(sentiment)) %>%
+  ungroup() %>%
+  arrange(-mean_trigger) %>%
+  select(trigger)
+
+df$trigger <- factor(df$trigger, levels = as.character(df_trigger$trigger), ordered = T)
+
+plot_trigger <- ggplot(data = df, aes(x = trigger, y = sentiment)) +
+  geom_boxplot(width = 0.5) +
+  ggtitle("Sentiment analysis for sensitive political issues")
+ggsave("plot_trigger.jpg", plot_trigger)
+```
+
+
+7(3). The most infuriating country/region for Chinese diplomats?
+```{r message=F}
+df_region <- df %>%
+  group_by(region) %>%
+  summarize(mean_region = mean(sentiment)) %>%
+  ungroup() %>%
+  arrange(-mean_region) %>%
+  select(region)
+
+df$region <- factor(df$region, levels = as.character(df_region$region), ordered = T)
+
+plot_region <- ggplot(data = df, aes(x = region, y = sentiment)) +
+  geom_boxplot(width = 0.4) +
+  ggtitle("Sentiment analysis for the attitudes toward western countries")
+ggsave("plot_region.jpg", plot_region)
+```
+
+7(4). The most infuriating political figure?
+```{r message=F}
+df_target <- df %>%
+  group_by(individuals) %>%
+  summarize(mean_individuals = mean(sentiment)) %>%
+  ungroup() %>%
+  arrange(-mean_individuals) %>%
+  select(individuals)
+
+df$individuals <- factor(df$individuals, levels = as.character(df_target$individuals), ordered = T)
+
+plot_individuals <- ggplot(data = df, aes(x = individuals, y = sentiment)) +
+  geom_boxplot(width = 0.3) +
+  theme(axis.text.x = element_text(angle= 45, vjust = 1, hjust = 1))
+ggsave("plot_individuals.jpg", plot_individuals)
+```
+
+7(5). Overall tendency of sentiment
+```{r}
+df_date <- df %>%
+  group_by(date) %>%
+  mutate(mean_date = mean(sentiment)) %>%
+  ungroup() %>%
+  select(date, mean_date) %>%
+  unique()
+
+plot_date <- ggplot(data = df_date, aes(x = date, y = mean_date)) +
+  geom_point(size = 0.8)
+ggsave("plot_date.jpg", plot_date)
+```
+

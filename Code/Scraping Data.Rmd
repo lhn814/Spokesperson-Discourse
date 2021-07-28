@@ -1,0 +1,232 @@
+---
+title: "Scraping"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This project analyzes the Q&As of the regular press conference by the Ministry of Foreign Affairs of the PRC in recent two years. 
+
+1. Load required packages
+```{r message=FALSE}
+library(tidyverse)
+library(rvest)
+library(stringr)
+library(purrr)
+library(lubridate)
+```
+
+2. Get the URLs
+```{r}
+#Try the first page
+urls_1 <- read_html("https://www.fmprc.gov.cn/mfa_eng/xwfw_665399/s2510_665401/2511_665403/default.shtml") %>%
+  html_nodes(".newsLst_mod a") %>%
+  html_attr("href")
+
+#Get the URLs for all search pages
+search_1 <- "https://www.fmprc.gov.cn/mfa_eng/xwfw_665399/s2510_665401/2511_665403/default_"
+num <- as.character(1:12)
+search_2 <- ".shtml"
+search <- str_c(search_1, num, search_2)
+
+#Write a function to scrape all 12 pages
+attr <- function(URL) {
+  html_search <- read_html(URL) %>%
+  html_nodes(".newsLst_mod a") %>%
+  html_attr("href")
+  Sys.sleep(1)
+  return(html_search)
+}
+
+urls_other <- map(search, attr) %>%
+  unlist()
+urls <- c(urls_1, urls_other)
+
+#Combine the hyperlinks to be scraped into a list
+urls_sub <- gsub("^.", "", urls)
+urls_base <- "https://www.fmprc.gov.cn/mfa_eng/xwfw_665399/s2510_665401/2511_665403"
+urls_all <- str_c(urls_base, urls_sub)
+save(urls_all, file = "urls_English.RData") #to get reproducible data
+```
+
+3. The Scraping Function
+```{r warning=F}
+scrape_texts <- function(URL){
+  link <- read_html(URL)
+  
+  #Scrape the title
+  title <- html_nodes(link, ".title") %>%
+    html_text()
+  
+  #Deal with the title
+  date <- str_split(title, " on ")[[1]][2]
+  
+  speaker_1 <- str_split(title, "Spokesperson ")[[1]]
+  
+  speaker <- str_split(speaker_1, "'s")[[2]][1]
+  
+  nodes <- html_nodes(link, "p")
+  
+  #Get questions
+  get_questions <- function(x){
+  line <- x %>%
+    str_c(collapse = "")
+  
+  bold <- is.na(str_extract(line, "<b>|<strong>"))
+  
+  if (bold == F) {
+  questions <- html_text(x)
+  } else {questions <- NA}
+  
+  return(questions)
+  }
+  
+  #Get answers
+  get_answers <- function(x){
+  line <- x %>%
+    str_c(collapse = "")
+  
+  bold <- is.na(str_extract(line, "<b>|<strong>"))
+  
+  if (bold == T) {
+  answers <- html_text(x)
+  } else {answers <- NA}
+    
+  return(answers)
+  }
+  
+  #Finalize questions
+  questions <- map(nodes, get_questions) %>%
+    unlist() %>%
+    na.omit() %>%
+    str_trim("both")
+  
+  questions <- subset(questions, questions != "")
+  
+  A <- map(nodes, get_answers) %>%
+    unlist()
+  
+  #Turn the remarks before questions into NA
+  cnt <- 1
+  while (cnt > 0) {
+  if (is.na(A[cnt]) == 0) {
+    A[cnt] <- NA
+    cnt = cnt + 1
+  } else {break
+  }}
+  
+  #Concatenate the answer strings between two NAs
+  new_v <- vector()
+  
+  for (i in A) {
+  if (is.na(i) == 1) {
+    new_v <- append(new_v, "")
+    } else {if (length(tail(new_v, 1) > 0)) {
+      new_v[length(new_v)] <- paste(tail(new_v, 1), i, collapse = "")
+      } else {new_v[length(new_v)] <- i}}}
+  
+  #Finalize the data frame
+  new_v <- new_v %>%
+    str_trim("both") %>%
+    na.omit()
+  
+  answers <- subset(new_v, new_v != "")
+  
+  #Deal with some infrequent bugs: These are only temporary remedies
+  if (length(questions) > length(answers)) {
+    questions <- questions[-length(questions)]
+  } else if (length(questions) < length(answers)) {
+    questions <- append(questions, NA, after = 0)
+  }
+  
+  df <- data_frame(date = date,
+                   speaker = speaker,
+                   questions = questions,
+                   answers = answers)
+
+  Sys.sleep(1)
+  
+  return(df)
+}
+```
+
+
+4. Conduct scraping
+```{r warning=F}
+#I omit three pages (number 188, 257, 404) due to their irregular formatting. The division also helps prevent timeouts.
+all_texts_1 <- map_dfr(urls_all[1:187], scrape_texts)
+all_texts_2 <- map_dfr(urls_all[189:256], scrape_texts)
+all_texts_3 <- map_dfr(urls_all[258:403], scrape_texts)
+all_texts_4 <- map_dfr(urls_all[405:500], scrape_texts)
+```
+
+5. Get the omitted data
+```{r warning=F}
+#For the three pages with irregular nodes, I simply use text parsing to get their data
+scrape_others <- function(URL){
+  link <- read_html(URL)
+  
+  #Scrape the title
+  title <- html_nodes(link, ".title") %>%
+    html_text()
+  
+  #Deal with the title
+  date <- str_split(title, " on ")[[1]][2]
+  
+  speaker_1 <- str_split(title, "Spokesperson ")[[1]]
+  
+  speaker <- str_split(speaker_1, "'s")[[2]][1]
+  
+  texts <- html_nodes(link, "p") %>%
+    html_text() %>%
+    str_c(collapse = "")
+  
+  chunks <- str_split(texts, "Q:")[[1]] %>%
+    str_trim("both") %>%
+    na.omit()
+  
+  chunks <- subset(chunks, chunks != "") %>%
+    unlist()
+  
+  separate_QAs <- function(x){
+  raw_text <- x
+ 
+#The if loop filters out the remarks by spokespersons without questions 
+  if (is.na(str_split(raw_text, "A:")[[1]][2]) == 1) {
+    questions <- NA
+    answers <- raw_text
+  } else {
+  questions <- str_split(raw_text, "A:")[[1]][1] 
+  answers <- str_split(raw_text, "A:")[[1]][2]
+  }
+  
+  return(data.frame(questions = questions,
+                    answers = answers))
+}
+
+  QA_df <- map_dfr(chunks, separate_QAs)
+  
+  df <- data_frame(date = date,
+                   speaker = speaker,
+                   QA_df)
+  
+  return(df)
+}
+
+omit_texts_1 <- scrape_others(urls_all[188])
+omit_texts_2 <- scrape_others(urls_all[257])
+omit_texts_3 <- scrape_others(urls_all[404])
+```
+
+
+6. Basic cleaning and save data
+```{r}
+all_texts <- rbind.data.frame(all_texts_1, omit_texts_1, all_texts_2, omit_texts_2, all_texts_3, omit_texts_3, all_texts_4)
+
+all_texts$date <- mdy(all_texts$date)
+
+write.csv(all_texts, "all_texts_EN.csv", row.names = F)
+```
+
